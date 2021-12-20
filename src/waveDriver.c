@@ -19,10 +19,13 @@
 #include "wavedriver.h" // a4954_oid_lookup
 #include "sched.h" // DECL_SHUTDOWN
 // I'm going to keep these for now...
-
-#define USE_FULL_WAVE 1 // use high torque full wave drive... when needed.
-#define USE_TMC 1		// use TMC SPI instead of PWM
-
+#define true 1
+#define false 0
+#define USE_PIIPs				false
+#define USE_FULL_WAVE			true // use high torque full wave drive... when needed.
+#define USE_TMC					true // use TMC SPI instead of PWM
+#define USE_POWERBOOST			true // boost Current
+#define USE_MAX_PIDOUT_CYCLE	true
 
 // no need to define an ouput struct here yet...
 // struct a4954 {
@@ -122,6 +125,40 @@ PhPointer &= 0x03FFF; // 4 x 4096, 1 cycle / 4steps is enough info, throw away a
 }
 
 // wave / phase lookup & powermanagement
+static inline void calc_Power_linear() // 
+{
+	static uint16_t _tmc_waverangeCeil_A;
+	static uint16_t _tmc_waverangeCeil_B;
+	static uint16_t _tmc_waverange;
+	const static uint32_t pidRangeShiftedMax = pidRangeMAX - pidRangeMIN;
+	const static uint8_t shiftBits = 3;
+	//	const static uint16_t pidRangeCeil = ((pidRangeMIN * 3) / 4);  // 75%
+	const static uint16_t pidRangeCeil = ((pidRangeMIN * 4) / 5);  // 80%
+//	const static uint16_t pidRangeCeil = ((pidRangeMIN * 6) / 7);  // 85%
+//	const static uint16_t pidRangeCeil = ((pidRangeMIN * 9) / 10); // 90%
+//	const static uint16_t pidRangeCeil = pidRangeMIN;			   // 100%
+
+
+#if USE_MAX_PIDOUT_CYCLE
+#if USE_POWERBOOST
+	_tmc_waverangeCeil_A = ((map(constrain(PID_OutLEd_Prev_Max, 0, pidRangeCeil), 0, pidRangeCeil, tmc_min_waverange, tmc_max_burst_waverange)) << shiftBits);
+	_tmc_waverangeCeil_B = ((map(PID_Out_SpdAdd, 0, pidRangeShiftedMax, tmc_min_waverange, tmc_max_burst_waverange)) << shiftBits);
+	if (_tmc_waverangeCeil_B > _tmc_waverangeCeil_A) _tmc_waverangeCeil_A = _tmc_waverangeCeil_B;
+	if (_tmc_waverangeCeil_A < _tmc_waverange) _tmc_waverange--;
+	else if (_tmc_waverangeCeil_A > _tmc_waverange) _tmc_waverange = _tmc_waverangeCeil_A;
+	tmc_waverange = _tmc_waverange >> shiftBits;
+	tmc_waverange = ((tmc_waverange * tmc_otw_power_scale) >> 8);
+
+	if (motorStalled) tmc_waverange = tmc_min_waverange;
+	if (tmc_waverange < tmc_min_waverange) tmc_waverange = tmc_min_waverange;
+
+	if (tmc_waverange_led < tmc_waverange) tmc_waverange_led = tmc_waverange;
+#endif
+#endif
+
+}
+
+
 static inline void drive_wave_lookup()
 {
 
@@ -158,8 +195,6 @@ static uint8_t PhaseB_old = 0;
 		Out_A = wave_array_default[PhPointerA];
 		(bool(PhaseA & 8)) ? Out_B = -Out_B : Out_A = -Out_A;
 	}
-
-
 	if (SWAP_OUTPUTS_A_B)
 	{
 		Out_Bb = map(Out_A, -2047, 2047, -(tmc_waverange), tmc_waverange);  // 4095 > 248
@@ -171,13 +206,7 @@ static uint8_t PhaseB_old = 0;
 		Out_Aa = map(Out_A, -2047, 2047, -(tmc_waverange), tmc_waverange);
 	}
 
-
-#if  USE_FULL_WAVE
-	//#define fullwave_offset 128
-	//#define fullwave_max 192
-	//	full_wave = map(tmc_waverange, tmc_min_waverange, tmc_max_burst_waverange, 0, (fullwave_max + fullwave_offset));
-	//	full_wave = constrain((full_wave - fullwave_offset), 0, fullwave_max);
-
+#if  USE_FULL_WAVE  // only for tmc's right now
 #define fullwave_min_pps 176 // 200 = 37500 mm/min.
 #define fullwave_max_pps 384 // 256 = 48000 mm/min
 #define fullwave_min_pid 3840 // 
@@ -185,7 +214,6 @@ static uint8_t PhaseB_old = 0;
 #define fullwave_max_A 224 // 208
 #define fullwave_max_B 224 // 208
 
-//	if (abs(myPID.spd_Sensor_sum) >= fullwave_min_pps) {
 	if ((abs(myPID.spd_Sensor_sum) >= fullwave_min_pps) || (abs(PID_Out) >= fullwave_min_pid)) {
 		full_wave_A = map((constrain(abs(myPID.spd_Sensor_sum), fullwave_min_pps, fullwave_max_pps)), fullwave_min_pps, fullwave_max_pps, 0, fullwave_max_A);
 		full_wave_B = map((constrain(abs(PID_Out), fullwave_min_pid, fullwave_max_pid)), fullwave_min_pid, fullwave_max_pid, 0, fullwave_max_B);
@@ -206,32 +234,10 @@ static uint8_t PhaseB_old = 0;
 		}
 	}
 #endif
-	//if (SWAP_POLARITY_A)
-	//{
-	//	Out_Aa = -Out_Aa;
-	//}
 
-	//(Motor_enable) ? ledcWrite(PWM_CHANNEL_A, Out_Aa) : ledcWrite(PWM_CHANNEL_A, 0); // turn motor off
-	//(Motor_enable) ? ledcWrite(PWM_CHANNEL_B, Out_Bb) : ledcWrite(PWM_CHANNEL_B, 0); // turn motor off
-
-	//if (full_wave_8bit)
-	//{
-	//	//		powerfactor = powerNom;
-	//	powerfactor = powerMax;
-	//}
-
-
-	//if ((powerfactor_o >> 4) != (powerfactor >> 4))
-	//{
-	//	driver.rms_current(powerfactor); 	// double it for direct mode
-	//	powerfactor_o = powerfactor;
-	//}
 	if ((Out_Aa_old != Out_Aa) || (Out_Bb_old != Out_Bb))
 	{
-		//(Motor_enable) ? driver.XDIRECT(((uint32_t)Out_Aa & COIL_A_bm) | (((uint32_t)Out_Bb << 16) & COIL_B_bm)) : driver.XDIRECT(0); // turn motor off
-//		noInterrupts();
 		driver.XDIRECT(((uint32_t)Out_Aa & COIL_A_bm) | (((uint32_t)Out_Bb << 16) & COIL_B_bm));
-		//		interrupts();
 		Out_Aa_old = Out_Aa;
 		Out_Bb_old = Out_Bb;
 	}
@@ -259,11 +265,6 @@ static uint8_t PhaseB_old = 0;
 			// if nothing is done, check for temperature,
 		}
 	}
-	//digitalWrite(Pin_driver[0], bool(PhaseA & 8));
-	//digitalWrite(Pin_driver[1], bool(PhaseA & 4));
-
-	//digitalWrite(Pin_driver[2], bool(PhaseB & 2));
-	//digitalWrite(Pin_driver[3], bool(PhaseB & 1));
 
 //	PhPointer += stepperPwmRes;
 
@@ -285,6 +286,13 @@ static inline void PWM_out(int16_t outA, int16_t outB)
 	static int16_t Out_Bb_old;
 	//	static uint16_t powerfactor_o;
 	static bool scheduler = false;
+
+digitalWrite(Pin_driver[0], bool(PhaseA & 8));
+digitalWrite(Pin_driver[1], bool(PhaseA & 4));
+
+digitalWrite(Pin_driver[2], bool(PhaseB & 2));
+digitalWrite(Pin_driver[3], bool(PhaseB & 1));
+
 
 }
 
