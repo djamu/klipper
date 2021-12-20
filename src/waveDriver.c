@@ -97,9 +97,7 @@ PIIP_Sum = PIIP_Out;
 #if SPLIT_CORRECTION_CURVE
 //offset wavepointer by correction curve(s) for closed loop
 // offset @ projected position, not current
-//	offsetPointer = (((PhPointer - 2048) / substepsDec) % stepperResolution);
 offsetPointer = (((PhPointer - 4096) / substepsDec) % stepperResolution);
-//	offsetPointer = (((PhPointer - 6144) / substepsDec) % stepperResolution);
 PhPointer -= curve_yValues_lookup[offsetPointer]; // project to desired value
 offsetPointer = (((PhPointer - 2048) / substepsDec) % stepperResolution);
 PhPointer -= cyclic_avg_offset[(offsetPointer & 127)]; // project to desired value
